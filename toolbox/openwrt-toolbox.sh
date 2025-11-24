@@ -118,14 +118,14 @@ generate_backup_filename() {
     echo "${model}_${hostname}_${timestamp}.${suffix}"
 }
 
-# 修复：列出可用硬盘（适配 OpenWrt 常见设备名：mmcblk/nvme/sd 等）
+# 强制列出所有磁盘（不筛选，确保显示所有设备）
 list_available_disks() {
     echo -e "\n${COLOR_INFO}[可用硬盘设备]${COLOR_RESET}"
-    # 匹配 OpenWrt 常见物理硬盘（mmcblk/nvme/sd/vda 等），排除虚拟设备
-    local disks=($(lsblk -dn -o NAME,TYPE | grep -E 'disk' | awk '{print "/dev/" $1}' | grep -E 'mmcblk|nvme|sd|vda|sda'))
+    # 列出所有disk类型设备（不做任何过滤）
+    local disks=($(lsblk -dn -o NAME,TYPE | grep -E 'disk' | awk '{print "/dev/" $1}'))
     
     if [ ${#disks[@]} -eq 0 ]; then
-        echo -e "${COLOR_WARN}  未检测到可用物理硬盘（若存在，请检查设备名是否在 mmcblk/nvme/sd/vda 中）${COLOR_RESET}"
+        echo -e "${COLOR_WARN}  未检测到任何磁盘设备！请先执行 fdisk -l 确认磁盘存在${COLOR_RESET}"
         return 1
     fi
     
