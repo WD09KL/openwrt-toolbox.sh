@@ -1,43 +1,58 @@
-# Simple workflow for deploying static content to GitHub Pages
-name: Deploy static content to Pages
+# toolbox/openwrt-toolbox.sh → 建议重命名为 .github/workflows/deploy-pages.yml
+# （注：Workflow 文件需放在 .github/workflows 目录下才会生效，已调整路径规范）
+
+name: Deploy OpenWrt Toolbox Docs
+# 更明确的名称，适配项目场景
 
 on:
-  # Runs on pushes targeting the default branch
   push:
     branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+    # 可选：仅当工具相关文件变更时触发（减少无效运行）
+    paths:
+      - 'docs/**'       # 若有文档目录
+      - 'toolbox/**'    # 工具核心目录
+      - 'README.md'     # 项目说明文件
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
-  # Single deploy job since we're just deploying
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Pages
+        with:
+          fetch-depth: 0  # 确保完整拉取历史（如需生成静态站点）
+
+      - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
-      - name: Upload artifact
+
+      # 可选：若需构建静态内容（如 Markdown 转 HTML），添加构建步骤
+      # - name: Build static docs
+      #   run: |
+      #     npm install  # 若需依赖
+      #     npm run build
+
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
+          # 按需调整路径：
+          # 1. 上传整个项目（默认）：path: '.'
+          # 2. 仅上传文档目录：path: 'docs'
+          # 3. 上传构建产物（如 dist）：path: 'dist'
           path: '.'
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
