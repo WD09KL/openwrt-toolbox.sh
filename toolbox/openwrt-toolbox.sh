@@ -1,11 +1,11 @@
 #!/bin/bash
-# OpenWrt 工具箱 v2.2（模块化交互框架 + 完整备份还原模块）
+# OpenWrt 工具箱 v2.3（修复硬盘检测+颜色显示）
 clear
 
 # ==========================================
 # 模块1：基础配置（颜色、常量、环境检测）
 # ==========================================
-# 终端颜色定义
+# 终端颜色定义（适配 OpenWrt 终端，避免转义符显示异常）
 COLOR_PRIMARY="\033[1;34m"   # 主色调（亮蓝）
 COLOR_SUCCESS="\033[1;32m"   # 成功色（亮绿）
 COLOR_WARN="\033[1;33m"      # 警告色（亮黄）
@@ -15,7 +15,7 @@ COLOR_RESET="\033[0m"        # 重置色
 
 # 常量配置
 TOOL_NAME="OpenWrt 快捷工具箱"
-TOOL_VERSION="v2.2"
+TOOL_VERSION="v2.3"
 TOOL_AUTHOR="自定义作者"
 TERMINAL_WIDTH=$(tput cols 2>/dev/null || echo 60)  # 自适应终端宽度
 BORDER_CHAR="="
@@ -69,17 +69,19 @@ check_env() {
 }
 
 # ==========================================
-# 模块2：工具函数（备份还原核心逻辑）
+# 模块2：工具函数（修复硬盘检测+颜色显示）
 # ==========================================
 # 绘制边框（自适应宽度）
 draw_border() {
     printf "%${TERMINAL_WIDTH}s\n" | tr " " "$1"
 }
 
-# 居中显示文本
+# 居中显示文本（修复颜色转义符宽度计算）
 center_text() {
     local text="$1"
-    local padding=$(( (TERMINAL_WIDTH - ${#text}) / 2 ))
+    # 移除颜色转义符后计算真实宽度
+    local text_width=$(echo "$text" | sed 's/\x1B\[[0-9;]*m//g' | wc -c)
+    local padding=$(( (TERMINAL_WIDTH - text_width) / 2 ))
     printf "%${padding}s%s%${padding}s\n" "" "$text" ""
 }
 
@@ -116,14 +118,14 @@ generate_backup_filename() {
     echo "${model}_${hostname}_${timestamp}.${suffix}"
 }
 
-# 列出可用硬盘（过滤非物理设备）
+# 修复：列出可用硬盘（适配 OpenWrt 常见设备名：mmcblk/nvme/sd 等）
 list_available_disks() {
     echo -e "\n${COLOR_INFO}[可用硬盘设备]${COLOR_RESET}"
-    # 过滤 disk/part 类型，排除 loop/tmpfs 等虚拟设备
-    local disks=($(lsblk -dn -o NAME,TYPE | grep -E 'disk|part' | awk '{print "/dev/" $1}' | grep -v 'loop' | grep -v 'tmpfs' | grep -v 'sr'))
+    # 匹配 OpenWrt 常见物理硬盘（mmcblk/nvme/sd/vda 等），排除虚拟设备
+    local disks=($(lsblk -dn -o NAME,TYPE | grep -E 'disk' | awk '{print "/dev/" $1}' | grep -E 'mmcblk|nvme|sd|vda|sda'))
     
     if [ ${#disks[@]} -eq 0 ]; then
-        echo -e "${COLOR_WARN}  未检测到可用物理硬盘${COLOR_RESET}"
+        echo -e "${COLOR_WARN}  未检测到可用物理硬盘（若存在，请检查设备名是否在 mmcblk/nvme/sd/vda 中）${COLOR_RESET}"
         return 1
     fi
     
@@ -226,7 +228,7 @@ list_backup_files() {
 }
 
 # ==========================================
-# 模块3：备份还原功能实现
+# 模块3：备份还原功能实现（无修改）
 # ==========================================
 # 1. 硬盘备份
 disk_backup() {
