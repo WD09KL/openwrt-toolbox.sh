@@ -1,11 +1,11 @@
 #!/bin/bash
-# OpenWrt 工具箱 v2.3（修复硬盘检测+颜色显示）
+# OpenWrt 工具箱 v2.4（优化版）
 clear
 
 # ==========================================
 # 模块1：基础配置（颜色、常量、环境检测）
 # ==========================================
-# 终端颜色定义（适配 OpenWrt 终端，避免转义符显示异常）
+# 终端颜色定义
 COLOR_PRIMARY="\033[1;34m"   # 主色调（亮蓝）
 COLOR_SUCCESS="\033[1;32m"   # 成功色（亮绿）
 COLOR_WARN="\033[1;33m"      # 警告色（亮黄）
@@ -15,7 +15,7 @@ COLOR_RESET="\033[0m"        # 重置色
 
 # 常量配置
 TOOL_NAME="OpenWrt 快捷工具箱"
-TOOL_VERSION="v2.3"
+TOOL_VERSION="v2.4"
 TOOL_AUTHOR="自定义作者"
 TERMINAL_WIDTH=$(tput cols 2>/dev/null || echo 60)  # 自适应终端宽度
 BORDER_CHAR="="
@@ -24,13 +24,13 @@ SEPARATOR_CHAR="-"
 # 备份核心配置
 DEFAULT_BACKUP_DIR="/mnt/mmc0-1/istore_backup"  # 默认备份目录
 COMPRESS_MODES=("xz" "zstd" "gzip")             # 支持的压缩模式
-COMPRESS_LEVELS=("-9" "-1" "-9")                # 对应压缩级别（高/快/标准）
+COMPRESS_LEVELS=("-9" "-1" "-9")                # 对应压缩级别
 COMPRESS_DESCS=("高压缩（体积最小，速度最慢）" "快速压缩（速度优先，压缩比适中）" "标准压缩（平衡速度与体积）")
 BACKUP_TYPES=("disk" "system")                  # 备份类型：硬盘/系统
 SYSTEM_BACKUP_CMD="/usr/libexec/istore/overlay-backup backup"  # 系统备份命令
-SYSTEM_RESTORE_CMD="/usr/libexec/istore/overlay-backup to /var/run/cloned-overlay-backup when restore restoring from"  # 系统还原命令
+SYSTEM_RESTORE_CMD="/usr/libexec/istore/overlay-backup restore"  # 修复系统还原命令路径
 
-# 环境检测（基础校验）
+# 环境检测（增强版）
 check_env() {
     # 检查 root 权限
     if [ "$(id -u)" -ne 0 ]; then
@@ -57,14 +57,25 @@ check_env() {
         fi
     done
 
-    # 检查系统备份工具
-    if [ ! -x "$(echo "$SYSTEM_BACKUP_CMD" | awk '{print $1}')" ]; then
-        echo -e "\n${COLOR_WARN}[警告] 未检测到系统备份工具（${SYSTEM_BACKUP_CMD%% *}），系统备份/还原功能不可用${COLOR_RESET}"
-        read -p "$(echo -e "${COLOR_WARN}是否继续使用其他功能？(y/n) ${COLOR_RESET}")" -n 1 -r
-        echo -e "\n"
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
+    # 检查压缩工具
+    for comp in "${COMPRESS_MODES[@]}"; do
+        if ! command -v "$comp" &> /dev/null; then
+            echo -e "\n${COLOR_WARN}[警告] 缺少压缩工具 $comp，该压缩模式将不可用${COLOR_RESET}"
         fi
+    done
+
+    # 检查系统备份工具
+    local sys_backup_bin=$(echo "$SYSTEM_BACKUP_CMD" | awk '{print $1}')
+    if [ ! -x "$sys_backup_bin" ]; then
+        echo -e "\n${COLOR_DANGER}[错误] 未检测到系统备份工具（$sys_backup_bin），系统备份/还原功能不可用${COLOR_RESET}"
+        exit 1
+    fi
+
+    # 检查系统还原工具
+    local sys_restore_bin=$(echo "$SYSTEM_RESTORE_CMD" | awk '{print $1}')
+    if [ ! -x "$sys_restore_bin" ]; then
+        echo -e "\n${COLOR_DANGER}[错误] 未检测到系统还原工具（$sys_restore_bin），系统还原功能不可用${COLOR_RESET}"
+        exit 1
     fi
 }
 
@@ -118,28 +129,40 @@ generate_backup_filename() {
     echo "${model}_${hostname}_${timestamp}.${suffix}"
 }
 
-# 强制列出所有磁盘（不筛选，确保显示所有设备）
+# 列出可用磁盘（带权限和系统盘检测）
 list_available_disks() {
     echo -e "\n${COLOR_INFO}[可用硬盘设备]${COLOR_RESET}"
-    # 列出所有disk类型设备（不做任何过滤）
+    # 列出所有disk类型设备并过滤可写设备
     local disks=($(lsblk -dn -o NAME,TYPE | grep -E 'disk' | awk '{print "/dev/" $1}'))
+    local valid_disks=()
     
-    if [ ${#disks[@]} -eq 0 ]; then
-        echo -e "${COLOR_WARN}  未检测到任何磁盘设备！请先执行 fdisk -l 确认磁盘存在${COLOR_RESET}"
+    for disk in "${disks[@]}"; do
+        if [ -w "$disk" ]; then
+            valid_disks+=("$disk")
+        fi
+    done
+    
+    if [ ${#valid_disks[@]} -eq 0 ]; then
+        echo -e "${COLOR_WARN}  未检测到可写磁盘设备！请先执行 fdisk -l 确认磁盘存在并检查权限${COLOR_RESET}"
         return 1
     fi
     
-    # 显示硬盘列表（带容量）
-    for i in "${!disks[@]}"; do
-        local disk=${disks[$i]}
+    # 显示硬盘列表（带容量和系统盘标记）
+    for i in "${!valid_disks[@]}"; do
+        local disk=${valid_disks[$i]}
         local size=$(lsblk -dn -o SIZE "$disk" 2>/dev/null || echo "未知")
-        echo -e "  ${COLOR_SUCCESS}$((i+1)).${COLOR_RESET} $disk （容量：$size）"
+        local is_system=""
+        # 检测是否为系统盘（包含根分区）
+        if lsblk -no MOUNTPOINT "$disk"* 2>/dev/null | grep -q "^/$"; then
+            is_system="${COLOR_DANGER} [系统盘]${COLOR_RESET}"
+        fi
+        echo -e "  ${COLOR_SUCCESS}$((i+1)).${COLOR_RESET} $disk （容量：$size）$is_system"
     done
     echo ""
-    echo "${disks[@]}"  # 返回硬盘数组（供选择）
+    echo "${valid_disks[@]}"  # 返回有效硬盘数组
 }
 
-# 选择备份目录（默认/自定义）
+# 选择备份目录（增强错误处理）
 select_backup_dir() {
     echo -e "\n${COLOR_INFO}[选择备份目录]${COLOR_RESET}"
     echo -e "  ${COLOR_SUCCESS}1.${COLOR_RESET} 使用默认目录：${DEFAULT_BACKUP_DIR}"
@@ -167,32 +190,58 @@ select_backup_dir() {
         fi
     fi
 
+    # 检查目录可写性
+    if [ ! -w "$backup_dir" ]; then
+        echo -e "${COLOR_DANGER}[错误] 目录 $backup_dir 不可写，请检查权限${COLOR_RESET}"
+        return 1
+    fi
+
     echo -e "\n${COLOR_SUCCESS}[确认] 备份目录：$backup_dir${COLOR_RESET}"
     echo "$backup_dir"  # 返回选择的目录
 }
 
-# 选择压缩模式
+# 选择压缩模式（过滤不可用模式）
 select_compress_mode() {
     echo -e "\n${COLOR_INFO}[选择压缩模式]${COLOR_RESET}"
+    local available_modes=()
+    local available_levels=()
+    local available_descs=()
+    
+    # 过滤可用的压缩模式
     for i in "${!COMPRESS_MODES[@]}"; do
-        echo -e "  ${COLOR_SUCCESS}$((i+1)).${COLOR_RESET} ${COMPRESS_MODES[$i]} —— ${COMPRESS_DESCS[$i]}（压缩级别：${COMPRESS_LEVELS[$i]}）"
+        if command -v "${COMPRESS_MODES[$i]}" &> /dev/null; then
+            available_modes+=("${COMPRESS_MODES[$i]}")
+            available_levels+=("${COMPRESS_LEVELS[$i]}")
+            available_descs+=("${COMPRESS_DESCS[$i]}")
+        fi
     done
+    
+    if [ ${#available_modes[@]} -eq 0 ]; then
+        echo -e "${COLOR_DANGER}[错误] 未检测到任何可用的压缩工具${COLOR_RESET}"
+        return 1
+    fi
+    
+    # 显示可用压缩模式
+    for i in "${!available_modes[@]}"; do
+        echo -e "  ${COLOR_SUCCESS}$((i+1)).${COLOR_RESET} ${available_modes[$i]} —— ${available_descs[$i]}（压缩级别：${available_levels[$i]}）"
+    done
+    
     read -p "$(echo -e "${COLOR_INFO}请选择（默认1）：${COLOR_RESET}")" compress_choice
 
-    # 默认选择1（xz）
-    if [ -z "$compress_choice" ] || [ "$compress_choice" -lt 1 ] || [ "$compress_choice" -gt ${#COMPRESS_MODES[@]} ]; then
+    # 默认选择1（第一个可用模式）
+    if [ -z "$compress_choice" ] || [ "$compress_choice" -lt 1 ] || [ "$compress_choice" -gt ${#available_modes[@]} ]; then
         compress_choice=1
     fi
 
     local index=$((compress_choice - 1))
-    local compress_mode=${COMPRESS_MODES[$index]}
-    local compress_level=${COMPRESS_LEVELS[$index]}
+    local compress_mode=${available_modes[$index]}
+    local compress_level=${available_levels[$index]}
 
     echo -e "\n${COLOR_SUCCESS}[确认] 压缩模式：$compress_mode（级别：$compress_level）${COLOR_RESET}"
     echo "$compress_mode $compress_level"  # 返回模式和级别
 }
 
-# 列出指定目录的备份文件（按时间倒序，区分备份类型）
+# 列出指定目录的备份文件（按时间倒序）
 list_backup_files() {
     local backup_dir="$1"
     local backup_type="$2"  # disk/system
@@ -214,7 +263,7 @@ list_backup_files() {
         return 1
     fi
 
-    # 显示备份列表（带序号、文件名、大小、修改时间）
+    # 显示备份列表
     for i in "${!backups[@]}"; do
         local file=${backups[$i]}
         local filename=$(basename "$file")
@@ -227,8 +276,20 @@ list_backup_files() {
     echo "${backups[@]}"  # 返回备份文件数组
 }
 
+# 提取压缩模式（修复多后缀问题）
+get_compress_mode() {
+    local filename="$1"
+    # 正则匹配已知压缩后缀
+    if [[ "$filename" =~ \.(xz|zstd|gzip)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
 # ==========================================
-# 模块3：备份还原功能实现（无修改）
+# 模块3：备份还原功能实现
 # ==========================================
 # 1. 硬盘备份
 disk_backup() {
@@ -260,6 +321,10 @@ disk_backup() {
 
     # 步骤3：选择压缩模式
     local compress_info=$(select_compress_mode)
+    if [ -z "$compress_info" ]; then
+        read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
+        return
+    fi
     local compress_mode=$(echo "$compress_info" | awk '{print $1}')
     local compress_level=$(echo "$compress_info" | awk '{print $2}')
 
@@ -281,20 +346,25 @@ disk_backup() {
         return
     fi
 
-    # 步骤6：执行备份（umount 避免占用，后台运行+日志）
+    # 步骤6：执行备份
     echo -e "\n${COLOR_SUCCESS}[开始备份] 正在备份 $source_disk 到 $backup_path...${COLOR_RESET}"
     echo -e "${COLOR_INFO}提示：备份过程可能较长，请耐心等待，请勿中断！${COLOR_RESET}"
     
     # 卸载硬盘分区（避免占用）
     umount "${source_disk}"* 2>/dev/null
 
-    # 执行备份命令（后台运行，输出日志）
+    # 执行备份命令（带错误处理）
     LOG_FILE="$backup_dir/disk_backup_$(date +'%Y%m%d_%H%M%S').log"
     nohup bash -c "
-        dd if=$source_disk bs=1M status=progress oflag=direct | $compress_mode $compress_level > '$backup_path' && \
-        md5sum '$backup_path' > '$md5_path' && \
-        md5sum -c '$md5_path' >> '$LOG_FILE' 2>&1 && \
-        echo '[$(date +'%Y-%m-%d %H:%M:%S')] 硬盘备份完成，校验成功' >> '$LOG_FILE'
+        set -e
+        dd if=$source_disk bs=1M status=progress oflag=direct | $compress_mode $compress_level > '$backup_path'
+        md5sum '$backup_path' > '$md5_path'
+        if md5sum -c '$md5_path' >> '$LOG_FILE' 2>&1; then
+            echo '[$(date +'%Y-%m-%d %H:%M:%S')] 硬盘备份完成，校验成功' >> '$LOG_FILE'
+        else
+            echo '[$(date +'%Y-%m-%d %H:%M:%S')] 硬盘备份完成，但校验失败' >> '$LOG_FILE'
+            exit 1
+        fi
     " > "$LOG_FILE" 2>&1 &
 
     echo -e "\n${COLOR_SUCCESS}[备份启动成功]${COLOR_RESET}"
@@ -318,8 +388,12 @@ system_backup() {
         return
     fi
 
-    # 步骤2：选择压缩模式（系统备份命令支持管道压缩）
+    # 步骤2：选择压缩模式
     local compress_info=$(select_compress_mode)
+    if [ -z "$compress_info" ]; then
+        read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
+        return
+    fi
     local compress_mode=$(echo "$compress_info" | awk '{print $1}')
     local compress_level=$(echo "$compress_info" | awk '{print $2}')
 
@@ -341,15 +415,20 @@ system_backup() {
         return
     fi
 
-    # 步骤5：执行系统备份（调用 istore 工具+管道压缩）
+    # 步骤5：执行系统备份
     echo -e "\n${COLOR_SUCCESS}[开始备份] 正在备份系统到 $backup_path...${COLOR_RESET}"
     LOG_FILE="$backup_dir/system_backup_$(date +'%Y%m%d_%H%M%S').log"
 
     nohup bash -c "
-        $SYSTEM_BACKUP_CMD - | $compress_mode $compress_level > '$backup_path' && \
-        md5sum '$backup_path' > '$md5_path' && \
-        md5sum -c '$md5_path' >> '$LOG_FILE' 2>&1 && \
-        echo '[$(date +'%Y-%m-%d %H:%M:%S')] 系统备份完成，校验成功' >> '$LOG_FILE'
+        set -e
+        $SYSTEM_BACKUP_CMD - | $compress_mode $compress_level > '$backup_path'
+        md5sum '$backup_path' > '$md5_path'
+        if md5sum -c '$md5_path' >> '$LOG_FILE' 2>&1; then
+            echo '[$(date +'%Y-%m-%d %H:%M:%S')] 系统备份完成，校验成功' >> '$LOG_FILE'
+        else
+            echo '[$(date +'%Y-%m-%d %H:%M:%S')] 系统备份完成，但校验失败' >> '$LOG_FILE'
+            exit 1
+        fi
     " > "$LOG_FILE" 2>&1 &
 
     echo -e "\n${COLOR_SUCCESS}[备份启动成功]${COLOR_RESET}"
@@ -374,23 +453,29 @@ disk_restore() {
         return
     fi
 
-    # 步骤2：列出硬盘备份文件（默认选最新）
+    # 步骤2：列出硬盘备份文件
     local backups=($(list_backup_files "$backup_dir" "disk"))
     if [ ${#backups[@]} -eq 0 ]; then
         read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
         return
     fi
 
-    # 选择备份文件（默认1=最新）
+    # 选择备份文件
     read -p "$(echo -e "${COLOR_INFO}请选择要还原的备份序号（默认1=最新）：${COLOR_RESET}")" backup_choice
     if [ -z "$backup_choice" ] || [ "$backup_choice" -lt 1 ] || [ "$backup_choice" -gt ${#backups[@]} ]; then
         backup_choice=1
     fi
     local backup_path=${backups[$((backup_choice - 1))]}
     local md5_path="$backup_path.md5"
-    local compress_mode=$(basename "$backup_path" | awk -F '.' '{print $NF}')
+    local compress_mode=$(get_compress_mode "$(basename "$backup_path")")
+    
+    if [ -z "$compress_mode" ] || ! command -v "$compress_mode" &> /dev/null; then
+        echo -e "${COLOR_DANGER}[错误] 不支持的压缩格式或缺少对应的解压工具${COLOR_RESET}"
+        read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
+        return
+    fi
 
-    # 步骤3：选择目标硬盘（要还原到的硬盘）
+    # 步骤3：选择目标硬盘
     local disks=($(list_available_disks))
     if [ ${#disks[@]} -eq 0 ]; then
         read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
@@ -435,10 +520,11 @@ disk_restore() {
     # 卸载目标硬盘分区
     umount "${target_disk}"* 2>/dev/null
 
-    # 执行还原命令（根据压缩模式解压并写入硬盘）
+    # 执行还原命令
     LOG_FILE="$backup_dir/disk_restore_$(date +'%Y%m%d_%H%M%S').log"
     nohup bash -c "
-        $compress_mode -d -c '$backup_path' | dd of=$target_disk bs=1M status=progress oflag=direct && \
+        set -e
+        $compress_mode -d -c '$backup_path' | dd of=$target_disk bs=1M status=progress oflag=direct
         echo '[$(date +'%Y-%m-%d %H:%M:%S')] 硬盘还原完成' >> '$LOG_FILE'
     " > "$LOG_FILE" 2>&1 &
 
@@ -464,24 +550,30 @@ system_restore() {
         return
     fi
 
-    # 步骤2：列出系统备份文件（默认选最新）
+    # 步骤2：列出系统备份文件
     local backups=($(list_backup_files "$backup_dir" "system"))
     if [ ${#backups[@]} -eq 0 ]; then
         read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
         return
     fi
 
-    # 选择备份文件（默认1=最新）
+    # 选择备份文件
     read -p "$(echo -e "${COLOR_INFO}请选择要还原的备份序号（默认1=最新）：${COLOR_RESET}")" backup_choice
     if [ -z "$backup_choice" ] || [ "$backup_choice" -lt 1 ] || [ "$backup_choice" -gt ${#backups[@]} ]; then
         backup_choice=1
     fi
     local backup_path=${backups[$((backup_choice - 1))]}
     local md5_path="$backup_path.md5"
-    local compress_mode=$(basename "$backup_path" | awk -F '.' '{print $NF}')
+    local compress_mode=$(get_compress_mode "$(basename "$backup_path")")
+    
+    if [ -z "$compress_mode" ] || ! command -v "$compress_mode" &> /dev/null; then
+        echo -e "${COLOR_DANGER}[错误] 不支持的压缩格式或缺少对应的解压工具${COLOR_RESET}"
+        read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
+        return
+    fi
 
-    # 步骤3：确认还原信息（二次警告）
-    echo -e "\n${COLOR_DANGER}[还原警告] 即将还原系统配置，可能导致服务中断！${COLOR_RESET}"
+    # 步骤3：确认还原信息
+    echo -e "\n${COLOR_DANGER}[还原警告] 即将覆盖当前系统配置，操作前请确保已备份重要数据！${COLOR_RESET}"
     echo -e "${COLOR_INFO}[还原信息确认]${COLOR_RESET}"
     echo -e "  备份文件：$backup_path"
     echo -e "  压缩模式：$compress_mode"
@@ -506,118 +598,73 @@ system_restore() {
         echo -e "${COLOR_WARN}[警告] 未找到校验文件 $md5_path，将跳过校验${COLOR_RESET}"
     fi
 
-    # 步骤5：执行系统还原（解压备份文件并调用 istore 工具）
+    # 步骤5：执行系统还原
     echo -e "\n${COLOR_SUCCESS}[开始还原] 正在还原系统配置...${COLOR_RESET}"
+    echo -e "${COLOR_INFO}提示：还原过程可能需要几分钟，完成后建议重启设备！${COLOR_RESET}"
+    
     LOG_FILE="$backup_dir/system_restore_$(date +'%Y%m%d_%H%M%S').log"
-
     nohup bash -c "
-        # 解压备份文件到临时目录
+        set -e
         TMP_DIR=\$(mktemp -d)
-        $compress_mode -d -c '$backup_path' > \$TMP_DIR/backup.overlay.tar && \
-        # 调用 istore 还原命令
+        $compress_mode -d -c '$backup_path' > \$TMP_DIR/backup.overlay.tar
+        
+        # 校验tar文件完整性
+        if ! tar tf \$TMP_DIR/backup.overlay.tar >/dev/null 2>&1; then
+            echo '[$(date +'%Y-%m-%d %H:%M:%S')] 错误：tar文件损坏' >> '$LOG_FILE'
+            rm -rf \$TMP_DIR
+            exit 1
+        fi
+        
         $SYSTEM_RESTORE_CMD \$TMP_DIR/backup.overlay.tar && \
-        # 清理临时文件
         rm -rf \$TMP_DIR && \
-        echo '[$(date +'%Y-%m-%d %H:%M:%S')] 系统还原完成，建议重启设备' >> '$LOG_FILE'
+        echo '[$(date +'%Y-%m-%d %H:%M:%S')] 系统还原完成，请重启设备生效' >> '$LOG_FILE'
     " > "$LOG_FILE" 2>&1 &
 
     echo -e "\n${COLOR_SUCCESS}[还原启动成功]${COLOR_RESET}"
     echo -e "  日志文件：$LOG_FILE"
     echo -e "  查看进度：tail -f $LOG_FILE"
-    echo -e "${COLOR_WARN}[提示] 还原完成后请重启设备以应用配置！${COLOR_RESET}"
     read -p "$(echo -e "\n${COLOR_WARN}按 Enter 键返回...${COLOR_RESET}")"
 }
 
-# 备份还原子菜单
-show_backup_restore_menu() {
+# ==========================================
+# 模块4：主菜单与入口
+# ==========================================
+show_main_menu() {
+    clear
+    local border=$(draw_border "$BORDER_CHAR")
+    echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
+    center_text "${COLOR_SUCCESS}${TOOL_NAME} ${TOOL_VERSION}${COLOR_RESET}"
+    echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
+    echo -e "  ${COLOR_SUCCESS}1.${COLOR_RESET} 硬盘备份（完整克隆硬盘）"
+    echo -e "  ${COLOR_SUCCESS}2.${COLOR_RESET} 系统备份（备份overlay配置）"
+    echo -e "  ${COLOR_SUCCESS}3.${COLOR_RESET} 硬盘还原（恢复完整硬盘）"
+    echo -e "  ${COLOR_SUCCESS}4.${COLOR_RESET} 系统还原（恢复overlay配置）"
+    echo -e "  ${COLOR_SUCCESS}0.${COLOR_RESET} 退出工具"
+    echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
+}
+
+# 主程序入口
+main() {
+    check_env
     while true; do
-        clear
-        local border=$(draw_border "$BORDER_CHAR")
-        echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
-        center_text "${COLOR_SUCCESS}📦 备份与还原模块${COLOR_RESET}"
-        echo -e "${COLOR_INFO}  支持硬盘/系统备份，xz/zstd/gzip 压缩${COLOR_RESET}"
-        echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
-        echo ""
-
-        echo -e "${COLOR_WARN}【备份功能】${COLOR_RESET}"
-        echo -e "  ${COLOR_SUCCESS}1.${COLOR_RESET} 💾 硬盘备份   —— 选择硬盘+目录+压缩模式"
-        echo -e "  ${COLOR_SUCCESS}2.${COLOR_RESET} 🖥️  系统备份   —— 基于 istore overlay 备份"
-        echo ""
-
-        echo -e "${COLOR_WARN}【还原功能】${COLOR_RESET}"
-        echo -e "  ${COLOR_SUCCESS}3.${COLOR_RESET} 🔄 硬盘还原   —— 默认最新备份，支持历史选择"
-        echo -e "  ${COLOR_SUCCESS}4.${COLOR_RESET} 🔄 系统还原   —— 默认最新备份，支持历史选择"
-        echo ""
-
-        echo -e "${COLOR_WARN}【其他】${COLOR_RESET}"
-        echo -e "  ${COLOR_SUCCESS}5.${COLOR_RESET} 🚪 返回主菜单"
-        echo ""
-
-        echo -e "${COLOR_PRIMARY}$(draw_border "$SEPARATOR_CHAR")${COLOR_RESET}"
-        read -p "$(echo -e "${COLOR_INFO}请选择功能 [1-5]：${COLOR_RESET}")" choice
-
+        show_main_menu
+        read -p "$(echo -e "${COLOR_INFO}请选择功能（0-4）：${COLOR_RESET}")" choice
         case $choice in
             1) disk_backup ;;
             2) system_backup ;;
             3) disk_restore ;;
             4) system_restore ;;
-            5) return ;;
-            *)
-                echo -e "\n${COLOR_DANGER}[错误] 无效选择！请输入 1-5 之间的数字${COLOR_RESET}"
-                sleep 1.5
+            0) 
+                echo -e "\n${COLOR_INFO}[提示] 感谢使用，再见！${COLOR_RESET}\n"
+                exit 0 
+                ;;
+            *) 
+                echo -e "\n${COLOR_WARN}[警告] 请输入有效的选项（0-4）${COLOR_RESET}"
+                read -p "$(echo -e "${COLOR_WARN}按 Enter 键继续...${COLOR_RESET}")"
                 ;;
         esac
     done
 }
 
-# ==========================================
-# 模块4：主菜单与程序入口
-# ==========================================
-# 主菜单
-show_main_menu() {
-    clear
-    local border=$(draw_border "$BORDER_CHAR")
-    echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
-    center_text "${COLOR_SUCCESS}🛠️  $TOOL_NAME $TOOL_VERSION${COLOR_RESET}"
-    center_text "${COLOR_INFO}💻 适配 OpenWrt 全场景工具集${COLOR_RESET}"
-    center_text "${COLOR_WARN}👤 作者：$TOOL_AUTHOR${COLOR_RESET}"
-    echo -e "${COLOR_PRIMARY}$border${COLOR_RESET}"
-    echo ""
-
-    echo -e "${COLOR_WARN}【核心功能】${COLOR_RESET}"
-    echo -e "  ${COLOR_SUCCESS}1.${COLOR_RESET} 📦 备份与还原   —— 硬盘/系统备份+还原（支持3种压缩）"
-    echo ""
-
-    echo -e "${COLOR_WARN}【其他】${COLOR_RESET}"
-    echo -e "  ${COLOR_SUCCESS}2.${COLOR_RESET} 🚪 退出工具箱"
-    echo ""
-
-    echo -e "${COLOR_PRIMARY}$(draw_border "$SEPARATOR_CHAR")${COLOR_RESET}"
-    read -p "$(echo -e "${COLOR_INFO}请选择功能 [1-2]：${COLOR_RESET}")" choice
-}
-
-# 主程序入口
-main() {
-    # 初始化环境检测
-    check_env
-
-    # 主循环
-    while true; do
-        show_main_menu
-        case $choice in
-            1) show_backup_restore_menu ;;
-            2)
-                echo -e "\n${COLOR_SUCCESS}👋 感谢使用 $TOOL_NAME $TOOL_VERSION，再见！${COLOR_RESET}"
-                echo -e "${COLOR_PRIMARY}$(draw_border "$BORDER_CHAR")${COLOR_RESET}"
-                exit 0
-                ;;
-            *)
-                echo -e "\n${COLOR_DANGER}[错误] 无效选择！请输入 1-2 之间的数字${COLOR_RESET}"
-                sleep 1.5
-                ;;
-        esac
-    done
-}
-
-# 启动程序
+# 启动主程序
 main
